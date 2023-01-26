@@ -1,1 +1,338 @@
+---
+title: "DA3 HOMEWORK1"
+author: "Shahana Ayobi"
+date: '2023-01-21'
+output: pdf_document
+---
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+
+```{r include=FALSE}
+rm(list=ls())
+library(tidyverse)
+library(lmtest)
+library(sandwich)
+library(haven)
+library(stargazer)
+library(caret)
+library(grid)
+library(modelsummary)
+library(scales)
+library(data.table)
+library(estimatr)
+library(kableExtra)
+library(dplyr)
+library(estimatr)
+library(fixest)
+```
+
+```{r warning=FALSE, include=FALSE}
+# Loading the data
+data_all <- read_csv("https://osf.io/4ay9x/download")
+```
+
+```{r include=FALSE}
+# Keeping only the "Financial Managers" occupation for ages more than 20
+data <- data_all %>% filter(occ2012==0800 & age >= 20)
+```
+
+```{r include=FALSE}
+# Generating female, hourly wage, and log hourly wage variables, and eduational dummies
+data <- data %>% mutate(female=as.numeric(sex==2)) %>%
+  mutate(wage=earnwke/uhours) %>%
+  mutate(lnwage=log(wage))  %>%
+  mutate(No_diploma=as.numeric(grade92<=40), Associate=as.numeric(grade92==41 | grade92 == 42),
+         BA=as.numeric(grade92==43), MA=as.numeric(grade92==44),
+         Prof = as.numeric(grade92==45), PhD = as.numeric(grade92==46)) %>% mutate(agesq=age^2) %>% mutate(child = as.numeric(ownchild >= 1))
+         
+data <- data %>% mutate(educ = case_when(grade92 == 41 | grade92 == 42 ~ "Associate",
+                         grade92 == 43 ~ "Bachelors",
+                         grade92 == 44 ~ "Masters",
+                         grade92 == 45 ~ "Professional",
+                         grade92 == 46 ~ "PhD")) %>% 
+  mutate(race_white = ifelse(race == 1, "white", "other")) %>% mutate(white=as.numeric(race_white=="white"))
+# Add new variable for marital status, if married then 1 else 0
+data$marital_status <- ifelse(data$marital <= 3, 1, 0)
+# Summary of earnwke,uhours, and wage, here the wage and earnwke is less than zero
+data %>% filter(wage>=1) %>% dplyr::select(earnwke,uhours,wage) %>% summary()
+
+```
+
+# Introduction
+The purpose of this report is to develop a prediction model for *Accountants and Auditors* occupation in the United States using the data from [OSF](https://osf.io/4ay9x/download). The prediction models in this study were created using OLS regressions, and the best model was determined by considering lowest BIC and RMSE score as well as performing 4-fold cross-validation using the average RMSE of the individual models. A total of 4 models were created, each of which was initially tested on the entire sample before being divided into 4 folds for training and cross-validation.
+
+# Data Cleaning
+The OSF data was filtered for the occupation of **Accountants and Auditors** with census code of `0800` and 1812 observations. 
+Starting withe the independent variable, the hourly wage is calculated by dividing the weekly earnings **earnwke** by the number of hours **uhours**, and the log of the mentioned variable **lnwage** is also created. Additionally, the chosen data set is modified to include observations with hourly wages of at least one US dollar. The histogram shows that some accountants and auditors have higher wages which pulled mean to the right and made the distribution of wage rightly skewed. 
+
+```{r fig.show="hold", out.width="50%", echo=FALSE}
+# plotting wage and lnwage distribution
+ggplot(data, aes(wage)) +
+  geom_histogram(aes(y = (..count..)/sum(..count..)), binwidth = 5, boundary=0, fill = "darkblue", color = "white", size = 0.2, alpha = 0.7, na.rm=TRUE) +
+  labs(x = "Earnings per hour",y = "Percent")+
+  theme_bw() +
+  scale_y_continuous(expand = c(0.01,0.01),labels = scales::percent_format(accuracy = 1)) +
+  ggtitle("Figure 1: Earnings per hour") +
+  theme(panel.border = element_blank(), axis.text=element_text(size=8), plot.title = element_text(size = 12L, face = "bold", hjust = 0.5)) + xlim(0, 120)
+
+ggplot(data, aes(lnwage)) +
+  geom_histogram(aes(y = (..count..)/sum(..count..)), boundary=0, fill = "darkblue", color = "white", size = 0.2, alpha = 0.7,  show.legend=F, na.rm=TRUE) +
+  labs(x = "Earnings per hour ln(wage)",y = "Percent")+
+  theme_bw() +
+  scale_y_continuous(expand = c(0.01,0.01),labels = scales::percent_format(accuracy = 1)) +
+  ggtitle("Figure 2: Earnings per hour Ln ") +
+  theme(panel.border = element_blank(), axis.text=element_text(size=8), plot.title = element_text(size = 12L, face = "bold", hjust = 0.5)) + xlim(0,5)
+```
+
+The **Female** variable was transformed into one if a person is female is zero otherwise. Other variables are created and transformed to model, including education levels, ethnicity, marital status, and whether an individual has a child. The data is filtered for observations with more than 20 years of age and a quadratic age predictor is created to model non-linearity in age.
+ The education levels below college are added to the **No Diploma** category, and both vocational and academic associate certificates are added to the associate category.The rest of categories include having a BA, MA, PhD, and Professional degree.
+ 
+```{r fig.show="hold", out.width="50%", echo=FALSE}
+ggplot( data , aes(age, wage)) +
+  geom_point(size=0.5,alpha=0.6, na.rm = T, color = "#00BFC4") +
+  geom_smooth(method="loess" , formula = y ~ x , na.rm = T, color = "#F8766D" )+
+  theme_bw() +
+  labs(x = "Age",y = "Wage per Hour in USD") +
+  ggtitle("Figure 3: Loess: Wage ~ Age") + ylim(0, 120) + theme(panel.border = element_blank(), axis.text=element_text(size=8), plot.title = element_text(size = 12L, face = "bold", hjust = 0.5))
+
+ggplot(data = data[!is.na(data$educ),], aes(x = factor(educ), y = wage,
+                              fill = factor(female), color=factor(female))) +
+  geom_boxplot(alpha=0.8, na.rm=T, outlier.shape = NA, width = 0.8) +
+  stat_boxplot(geom = "errorbar", width = 0.8, size = 0.3, na.rm=T)+
+  scale_color_manual(name="",
+                     values=c('#F8766D','#00BFC4')) +
+  scale_fill_manual(name="",
+                    values=c('#F8766D','#00BFC4')) +
+  labs(x = "Education",y = "Wage per Hour (USD)")+
+  scale_y_continuous(expand = c(0.01,0.01), limits=c(0, 70), breaks = seq(0,70, 10))+
+ theme_bw() +
+  theme(legend.position = c(0.15,0.85), axis.text.x = element_text(angle=45, vjust=.5)) + ggtitle("Figure 4: Wage Distribution for Male and Female for Educational Categories") + theme(panel.border = element_blank(), axis.text=element_text(size=8), plot.title = element_text(size = 12L, face = "bold", hjust = 0.5))
+```
+
+
+# Models and Predictors
+  Education is likely one of the main predictors of earnings, thus the the simplest model, Model 1, includes  all above mentioned categories taking the **No Diploma** as the base category. As Figure 4 shows that except for the Associate degree, female accountants and auditors tend to earn lower than their male counterparts. Also, there are only 5 female observations that have PhD in this occupation, this is way it is not shown in the graph(Check Table 5 on Appendix).
+  The second model add more variables such as age and age squared since as a person ages, they gain work experience, thus, increasing their wages. Female variable is also added since there is a clear pay gap of 6.1 USD as shown in Table 4 in the Appendix. Third model includes more variables like marital status, and having a child since it is apparent from table 7 in the Appendix that married individuals earn 4.12 USD more.
+In the more complex model, Model 4, interactions are used to further capture the interaction of independent variables. Gender and education interactions, marital status and gender interactions, gender and having a child, and age and having a child interactions are added.
+
+# Model Performance
+A model's fit is measured using all of the original data, and the BIC penalizes model complexity and aids in preventing over-fitting. In general, models with a lower BIC are recommended. Model 4 of the models has the lowest BIC. The root mean squared loss over a number of target observations, or RMSE, is the second metric used to assess model performance. Once again the most complex model with 19 coefficients, Model 4, has the lowest RMSE. Considering these measures, the Model 4th is considered to be the best wage prediction model which explains approximately 36% of variation in wage.
+
+```{r include=FALSE}
+model1<- as.formula(wage ~ Associate + BA + MA + Prof + PhD)
+model2 <- as.formula(wage ~ Associate + BA + MA + Prof + PhD + age + agesq + female)
+model3 <- as.formula(wage ~ Associate + BA + MA + Prof + PhD + female + age + agesq + white + child + marital_status)
+model4 <- as.formula(wage ~ Associate + BA + MA + Prof + PhD + female + age +agesq + white + child + marital_status + marital_status*female+ female*Associate + female*BA+ female* MA + female* Prof+ female*PhD + female*child + age*child)
+
+reg1 <- lm(model1, data=data)
+reg2 <- lm(model2, data=data)
+reg3 <- lm(model3, data=data)
+reg4 <- lm(model4, data=data)
+
+reg1$coefficients
+summary(reg1, vcov = 'sandwich')
+
+logLik(reg1)
+
+# Find AIC and BIC from the data
+# official: AIC = 2k - 2*(max value of the likelihood function)
+# official: AIC = 2(k+1) - 2*(max value of the likelihood function)
+
+2*(reg1$rank+1) - 2*logLik(reg1)
+AIC(reg1)
+
+# log likelyhood is the function of errors, fit measure for errors, aic penalizes for adding more variables, the lower the better
+
+# BIC = k*ln(n) - 2*2*(max value of the likelihood function)
+# same correction is required with rank
+(reg1$rank+1)*log(nrow(data)) - 2*logLik(reg1)
+BIC(reg1)
+
+# evaluation of the models
+
+models <- c("reg1", "reg2","reg3", "reg4")
+AIC <- c()
+BIC <- c()
+RMSE <- c()
+RSquared <- c()
+regr <- c()
+k <- c()
+
+for ( i in 1:length(models)){
+  AIC[i] <- AIC(get(models[i]))
+  BIC[i] <- BIC(get(models[i]))
+  RMSE[i] <- RMSE(predict(get(models[i])), get(models[i])$model$wage)
+  RSquared[i] <-summary(get(models[i]))$r.squared
+  regr[[i]] <- coeftest(get(models[i]), vcov = sandwich)
+  k[i] <- get(models[i])$rank -1
+}
+eval <- data.frame(models, k, RSquared, RMSE, BIC)
+
+
+eval <- eval %>%
+  mutate(models = paste0("(",gsub("reg","",models),")")) %>%
+  rename(Model = models, "R-squared" = RSquared, "Training RMSE" = RMSE, "N predictors" = k)
+
+```
+
+```{r echo=FALSE, fig.show='hold', fig.align='center', fig.pos="H", fig.width=7,fig.height=4}
+knitr::kable(eval, caption = "Evaluation of Models", digits = 4, align = "lcccr", booktabs=T) %>% kable_styling(latex_options = c("HOLD_position", "resizebox=2.5\\textwidth"), font_size = 12, full_width = T) 
+```
+The result of the 4-fold cross validation after training the models on the training sets and validating it on the test sets, shows the 4th Model as the best one with lowest average RMSE of approximately 15.13. While the Average RMSE decreases at first as models become more complex, it slightly increases for the third model and decreases back on the 4th, suggesting that the 4th Model is preferred.
+
+```{r include=FALSE}
+# Cross-validation
+
+# set number of folds
+k <- 4
+# we have 4 folds,3 parts are training set, and then it rurns the errors for 4
+# set.seed, the randomization would be the same
+set.seed(13505)
+cv1 <- train(model1, data, method = "lm", trControl = trainControl(method = "cv", number = k))
+set.seed(13505)
+cv2 <- train(model2, data, method = "lm", trControl = trainControl(method = "cv", number = k))
+set.seed(13505)
+cv3 <- train(model3, data, method = "lm", trControl = trainControl(method = "cv", number = k), na.action = "na.omit")
+set.seed(13505)
+cv4 <- train(model4, data, method = "lm", trControl = trainControl(method = "cv", number = k), na.action = "na.omit")
+```
+
+```{r include=FALSE}
+# calculate average rmse
+cv <- c("cv1", "cv2", "cv3", "cv4")
+rmse_cv <- c()
+
+# has all the info
+cv1$resample
+
+
+for(i in 1:length(cv)){
+  rmse_cv[i] <- sqrt((get(cv[i])$resample[[1]][1]^2 +
+                       get(cv[i])$resample[[1]][2]^2 +
+                       get(cv[i])$resample[[1]][3]^2 +
+                       get(cv[i])$resample[[1]][4]^2)/4)
+}
+
+
+# summarize results
+cv_mat <- data.frame(rbind(cv1$resample[4], "Average"),
+           rbind(cv1$resample[1], rmse_cv[1]),
+           rbind(cv2$resample[1], rmse_cv[2]),
+           rbind(cv3$resample[1], rmse_cv[3]),
+           rbind(cv4$resample[1], rmse_cv[4]))
+
+colnames(cv_mat)<-c("Resample","Model1", "Model2", "Model3", "Model4")
+
+```
+
+```{r echo=FALSE, fig.show='hold', fig.align='center', fig.width=6,fig.height=4}
+knitr::kable(cv_mat, caption = "Four Fold Cross Validation Average RMSE", digits = 4, align = "lcccr", booktabs=T) %>% kable_styling(latex_options = c("HOLD_position"), font_size = 12, full_width = T)
+```
+
+```{r echo=FALSE, fig.show='hold', fig.align='center', fig.width=5,fig.height=3}
+m_comp <- c()
+models <- c("reg1", "reg2", "reg3", "reg4")
+for( i in 1 : length(cv) ){
+  m_comp[ i ] <- length( get( models[i] )$coefficient  - 1 ) 
+}
+m_comp <- tibble( model = models , 
+                  complexity = m_comp,
+                  RMSE = rmse_cv )
+ggplot( m_comp , aes( x = complexity , y = RMSE ) ) +
+  geom_point(color='red',size=2) +
+  geom_line(color= "blue",size=0.5)+
+  labs(x='Number of explanatory variables',y='Averaged RMSE on test samples',
+       title='Figure 5: Prediction Performance and Model Complexity') +
+  theme_bw() +
+  theme(axis.text=element_text(size=8), plot.title = element_text(size = 12L, face = "bold", hjust = 0.5))
+
+```
+
+\newpage
+# Appendix
+
+**Summary Statistics**
+```{r echo=FALSE}
+
+# Creating 5% and 95% 
+P05 <- function(x){ quantile(x,.05,na.rm=T)}
+P95 <- function(x){ quantile(x,.95,na.rm=T)}
+# Data Summary
+datasummary(
+  (`Earnings per hour` = wage) + 
+  (`Female` = female) + 
+  (`Associate` = Associate) +
+  (`BA Degree` = BA) + 
+  (`MA Degree` = MA) + 
+  (`Professional Degree` = Prof) + 
+  (`PhD` = PhD) + 
+  (`Age` = age) + 
+    (`Age Squared`= agesq) +
+  (`Has child` = child) +
+    (`White`=white)+
+  (`Marital Status` = marital_status) ~ Mean + Median + SD + Min + Max + P05 + P95 + N, 
+  data = data, 
+  title = "Summary Statistics" ) %>% 
+  kable_styling(latex_options = c("HOLD_position","scale_down"))
+```
+
+**Distribution of Wage in Male and Female**
+```{r echo=FALSE, fig.align='center', fig.width=6, fig.height=4}
+ggplot(data, aes(x=wage, color = as.factor(female), fill=as.factor(female))) +
+  geom_density(data=subset(data, female == 1), alpha=0.3, size=1.5) +
+  geom_density(data=subset(data, female== 0), alpha=0.3, size=1.5) + 
+  scale_fill_manual(values=c("#F8766D", "#00BFC4"), name= "Female") +
+  scale_color_manual(values=c("#F8766D", "#00BFC4"), name="Female") +
+  labs(x = 'Wage (In US Dollars)', y = 'Density', 
+       title = "Figure 2: Distribution of Wage in Male and Female") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 14, hjust = 0.5),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12)) +
+  xlim(0, 120) +
+  ylim(0, 0.05) + theme(panel.border = element_blank(), axis.text=element_text(size=8), plot.title = element_text(size = 12L, face = "bold", hjust = 0.5))
+```
+\newpage
+**Summary Tables for Variables**
+```{r echo=FALSE, fig.show='hold', fig.align='center', fig.pos="H", out.width="20%", fig.width=7, fig.height=4 }
+sum_female <- datasummary(wage* (`Female`=as.factor(female)) ~ Mean + SD + Min + Max + P25 + P75 + N , data = data, title = "Summary of Wages for Both Genders") %>% kable_styling(latex_options = c("HOLD_position", "resizebox=0.8\\textwidth"))
+sum_female
+sum_educfemale <- datasummary(female*(`Education` = as.factor(educ)) ~Mean +  N + Percent() + Min + Max, data = data, title = "Education Categories for Female") %>% kable_styling(latex_options = c("HOLD_position", "resizebox=0.8\\textwidth"))
+sum_educfemale
+sum_educ <- datasummary(wage*(`Education` = as.factor(educ)) ~Mean +  N + Percent() + Min + Max, data = data, title = "Summary of Wages for Education Categories") %>% kable_styling(latex_options = c("HOLD_position", "resizebox=0.8\\textwidth"))
+sum_educ
+sum_marital <- datasummary(wage* (`Marital Status`=as.factor(marital_status))~ Mean + N+ Percent() + Min + Max, data=data, title="Summary of Wages for Marital Status")%>% kable_styling(latex_options = c("HOLD_position", "resizebox=0.8\\textwidth"))
+sum_marital
+sum_white <- datasummary(wage*(`White`=as.factor(white)) ~ Mean + N+ Percent() + Min + Max, data=data, title="Summary of Wages for White and Non-white")%>% kable_styling(latex_options = c("HOLD_position", "resizebox=0.8\\textwidth"))
+sum_white
+```
+
+\newpage
+```{r echo=FALSE}
+variable_names <- c('(Intercept)' = 'Intercept',
+                    'wage' = 'Hourly wage',
+                    'Associate'='Associate Degree',
+                    'BA' = 'BA Degree',
+                    'MA' = 'MA Degree',
+                    'Prof' = 'Professional Degree',
+                    'PhD' = 'PhD',
+                     'female' = 'Female',
+                    'age' = 'Age',
+                    'agesq'='Age Squared',
+                    'marital_status'='Marital Status',
+                    'child' = 'Has Child',
+                    'white'='White')
+msummary(list(reg1, reg2, reg3, reg4),
+         fmt="%.4f",
+         gof_omit = 'DF|Deviance|Log.Lik.|F|R2 Adj.|AIC|BIC|RMSE',
+         stars=c('*' = .05, '**' = .01), coef_rename = variable_names,
+         title = "Simple Regressions Result")
+```
